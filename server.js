@@ -10,7 +10,7 @@ dotenv.config();
 // Configuration
 const PORT = process.env.PORT || 8080;
 const MONGO_URI = process.env.MONGO_URI;
-const DB_NAME = 'websocket_chat';
+const DB_NAME = 'SAKPHEADATABASE';
 
 // Create HTTP server
 const server = http.createServer();
@@ -155,6 +155,7 @@ async function broadcastUserList() {
 
 connectToMongo().then(() => {
   server.listen(PORT, () => {
+    console.log('MONGO_URI:', process.env.MONGO_URI);
     console.log(`Server listening on port ${PORT}`);
   });
 });
