@@ -1,13 +1,32 @@
 const WebSocket = require('ws');
-const PORT = process.env.PORT || 8080;
+const http = require('http');
 const { v4: uuidv4 } = require('uuid');
 
-const wss = new WebSocket.Server({ port: PORT });
-const users = new Map();
-const messageQueue = new Map(); // Stores pending messages per user
-const pendingAcknowledgments = new Map(); // Tracks messages awaiting acknowledgment
+// Railway provides PORT environment variable
+const PORT = process.env.PORT || 8080;
 
-wss.on('connection', (ws) => {
+// Create HTTP server
+const server = http.createServer();
+const wss = new WebSocket.Server({ server });
+
+// Store active connections and messages
+const users = new Map();
+const messageQueue = new Map();
+const pendingAcknowledgments = new Map();
+
+// Handle HTTP requests (optional)
+server.on('request', (req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('WebSocket server is running');
+});
+
+wss.on('connection', (ws, req) => {
+  // Handle CORS if needed
+  const origin = req.headers.origin;
+  if (origin) {
+    ws.upgradeReq.headers['Access-Control-Allow-Origin'] = origin;
+  }
+
   let username = '';
   
   ws.on('message', (message) => {
@@ -17,9 +36,9 @@ wss.on('connection', (ws) => {
       if (data.type === 'register') {
         username = data.username;
         users.set(username, ws);
-        console.log(`${username} connected`);
+        console.log(`${username} connected from ${req.socket.remoteAddress}`);
         
-        // Deliver any queued messages
+        // Deliver queued messages
         if (messageQueue.has(username)) {
           const pendingMessages = messageQueue.get(username);
           pendingMessages.forEach(msg => {
@@ -33,7 +52,7 @@ wss.on('connection', (ws) => {
       }
       
       if (data.type === 'message') {
-        const messageId = uuidv4();
+        const messageId = data.id || uuidv4();
         const recipient = users.get(data.to);
         const messageData = {
           type: 'message',
@@ -43,44 +62,38 @@ wss.on('connection', (ws) => {
           timestamp: new Date().toISOString()
         };
         
-        // Store message for acknowledgment tracking
+        // Track for acknowledgment
         pendingAcknowledgments.set(messageId, {
           sender: username,
           recipient: data.to,
           message: data.text,
           timestamp: new Date()
         });
-        
+
         if (recipient && recipient.readyState === WebSocket.OPEN) {
-          // Recipient is online - send immediately
+          // Recipient online - send immediately
           recipient.send(JSON.stringify(messageData));
           
-          // Schedule acknowledgment check (timeout after 30 seconds)
-          setTimeout(() => {
+          // Set delivery timeout (30 seconds)
+          const deliveryTimeout = setTimeout(() => {
             if (pendingAcknowledgments.has(messageId)) {
-              console.log(`No acknowledgment for message ${messageId}`);
+              console.log(`Delivery timeout for message ${messageId}`);
               pendingAcknowledgments.delete(messageId);
-              
-              // Notify sender about failed delivery
-              if (users.has(username)) {
-                users.get(username).send(JSON.stringify({
-                  type: 'delivery_status',
-                  messageId: messageId,
-                  status: 'failed',
-                  reason: 'No acknowledgment from recipient'
-                }));
-              }
+              notifySender(username, messageId, 'failed', 'Delivery timeout');
             }
           }, 30000);
+
+          // Store timeout reference
+          pendingAcknowledgments.get(messageId).timeout = deliveryTimeout;
         } else {
-          // Recipient offline - queue the message
+          // Recipient offline - queue message
           if (!messageQueue.has(data.to)) {
             messageQueue.set(data.to, []);
           }
           messageQueue.get(data.to).push(messageData);
           console.log(`Queued message ${messageId} for ${data.to}`);
           
-          // Immediately notify sender that message is queued
+          // Notify sender
           ws.send(JSON.stringify({
             type: 'delivery_status',
             messageId: messageId,
@@ -89,7 +102,7 @@ wss.on('connection', (ws) => {
           }));
         }
         
-        // Send preliminary acknowledgment to sender
+        // Send preliminary acknowledgment
         ws.send(JSON.stringify({
           type: 'ack',
           messageId: messageId,
@@ -100,47 +113,22 @@ wss.on('connection', (ws) => {
       }
       
       if (data.type === 'ack') {
-        // Handle acknowledgment from recipient
-        if (data.messageId && pendingAcknowledgments.has(data.messageId)) {
-          const msg = pendingAcknowledgments.get(data.messageId);
-          console.log(`Message ${data.messageId} acknowledged by ${username}`);
-          
-          // Notify original sender
-          if (users.has(msg.sender)) {
-            users.get(msg.sender).send(JSON.stringify({
-              type: 'delivery_status',
-              messageId: data.messageId,
-              status: 'delivered',
-              timestamp: new Date().toISOString()
-            }));
-          }
-          
-          pendingAcknowledgments.delete(data.messageId);
-        }
+        handleAcknowledgment(data.messageId, username);
         return;
       }
       
       if (data.type === 'read_receipt') {
-        // Handle read receipts
-        if (data.messageId && pendingAcknowledgments.has(data.messageId)) {
-          const msg = pendingAcknowledgments.get(data.messageId);
-          console.log(`Message ${data.messageId} read by ${username}`);
-          
-          // Notify original sender
-          if (users.has(msg.sender)) {
-            users.get(msg.sender).send(JSON.stringify({
-              type: 'read_status',
-              messageId: data.messageId,
-              status: 'read',
-              timestamp: new Date().toISOString()
-            }));
-          }
-        }
+        handleReadReceipt(data.messageId, username);
         return;
       }
       
     } catch (error) {
       console.error('Error processing message:', error);
+      ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Invalid message format',
+        timestamp: new Date().toISOString()
+      }));
     }
   });
 
@@ -153,20 +141,73 @@ wss.on('connection', (ws) => {
   });
   
   ws.on('error', (error) => {
-    console.error(`WebSocket error for ${username}:`, error);
+    console.error(`WebSocket error for ${username || 'unknown'}:`, error);
   });
 });
 
+// Helper functions
+function handleAcknowledgment(messageId, username) {
+  if (!messageId || !pendingAcknowledgments.has(messageId)) return;
+  
+  const msg = pendingAcknowledgments.get(messageId);
+  console.log(`Message ${messageId} acknowledged by ${username}`);
+  
+  // Clear delivery timeout
+  if (msg.timeout) clearTimeout(msg.timeout);
+  
+  // Notify sender
+  notifySender(msg.sender, messageId, 'delivered');
+  
+  pendingAcknowledgments.delete(messageId);
+}
+
+function handleReadReceipt(messageId, username) {
+  if (!messageId || !pendingAcknowledgments.has(messageId)) return;
+  
+  const msg = pendingAcknowledgments.get(messageId);
+  console.log(`Message ${messageId} read by ${username}`);
+  
+  notifySender(msg.sender, messageId, 'read');
+}
+
+function notifySender(sender, messageId, status, reason) {
+  if (users.has(sender)) {
+    users.get(sender).send(JSON.stringify({
+      type: 'delivery_status',
+      messageId: messageId,
+      status: status,
+      reason: reason,
+      timestamp: new Date().toISOString()
+    }));
+  }
+}
+
 function broadcastUserList() {
   const userList = Array.from(users.keys());
+  const message = JSON.stringify({
+    type: 'user_list',
+    users: userList,
+    timestamp: new Date().toISOString()
+  });
+  
   users.forEach((ws, username) => {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: 'user_list',
-        users: userList
-      }));
+      ws.send(message);
     }
   });
 }
 
-console.log(`WebSocket server running on port ${PORT}`);
+// Start server
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`WebSocket endpoint: ws://localhost:${PORT}`);
+});
+
+// Handle process termination
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received. Closing server...');
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
+});
