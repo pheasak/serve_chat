@@ -1,11 +1,13 @@
 const WebSocket = require('ws');
 const http = require('http');
+const dotenv = require('dotenv');
 const { v4: uuidv4 } = require('uuid');
 const { MongoClient } = require('mongodb');
+dotenv.config();
 
 // Configuration
 const PORT = process.env.PORT || 8080;
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017';
+const MONGO_URI = process.env.MONGO_URI;
 const DB_NAME = 'websocket_chat';
 
 // Create HTTP server
