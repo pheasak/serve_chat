@@ -10,7 +10,7 @@ console.log('MONGO_URI:', process.env.MONGO_URI);
 // MongoDB Connection
 const connectDB = async () => {
   try {
-    await mongoose.connect(process.env.MONGO_URI, {
+    await mongoose.connect('mongodb+srv://jakihotta:UXdaFfISleVYLDmx@cluster0.c8sb4dq.mongodb.net/SAKPHEADATABASE?retryWrites=true&w=majority', {
       dbName: 'SAKPHEADATABASE',
       useNewUrlParser: true,
       useUnifiedTopology: true,
