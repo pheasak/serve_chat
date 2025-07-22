@@ -10,8 +10,8 @@ console.log('MONGO_URI:', process.env.MONGO_URI);
 // MongoDB Connection
 const connectDB = async () => {
   try {
-    await mongoose.connect('mongodb+srv://jakihotta:UXdaFfISleVYLDmx@cluster0.c8sb4dq.mongodb.net/SAKPHEADATABASE?retryWrites=true&w=majority', {
-      dbName: 'chat_app',
+    await mongoose.connect(process.env.MONGO_URI, {
+      dbName: 'SAKPHEADATABASE',
       useNewUrlParser: true,
       useUnifiedTopology: true,
       serverSelectionTimeoutMS: 5000,
@@ -72,22 +72,7 @@ const Message = mongoose.model('Message', messageSchema);
 // WebSocket setup
 const PORT = process.env.PORT || 8080;
 const server = http.createServer();
-const wss = new WebSocket.Server({
-  server,
-  clientTracking: true,
-  perMessageDeflate: {
-    zlibDeflateOptions: {
-      chunkSize: 1024,
-      memLevel: 7,
-      level: 3
-    },
-    zlibInflateOptions: {
-      chunkSize: 10 * 1024
-    },
-    threshold: 1024,
-    concurrencyLimit: 10
-  }
-});
+const wss = new WebSocket.Server({ server });
 
 const activeConnections = new Map();
 const messageTimeouts = new Map();
@@ -109,6 +94,7 @@ server.on('request', (req, res) => {
   res.end();
 });
 
+// Handle new WebSocket connection
 wss.on('connection', (ws, req) => {
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
@@ -147,7 +133,17 @@ wss.on('connection', (ws, req) => {
     }
   });
 
-  // Your existing ping/pong logic is below...
+  ws.on('close', async () => {
+    if (ws.username) {
+      console.log(`${ws.username} disconnected`);
+      activeConnections.delete(ws.username);
+      await User.updateOne(
+        { username: ws.username },
+        { $set: { online: false, lastSeen: new Date() } }
+      );
+      broadcastUserList();
+    }
+  });
 });
 
 // Keep-alive ping
@@ -193,3 +189,132 @@ server.listen(PORT, () => {
     });
   });
 });
+
+// ==== Handlers ====
+
+async function handleRegistration(ws, data) {
+  const username = data.username;
+  if (!username) {
+    return sendError(ws, 'Username is required for registration');
+  }
+
+  try {
+    await User.updateOne(
+      { username },
+      {
+        $set: {
+          online: true,
+          ipAddress: ws._socket.remoteAddress,
+          lastSeen: new Date(),
+        },
+        $setOnInsert: { createdAt: new Date() },
+      },
+      { upsert: true }
+    );
+
+    activeConnections.set(username, ws);
+    ws.username = username;
+    console.log(`${username} registered and connected`);
+
+    broadcastUserList();
+  } catch (err) {
+    console.error('Registration error:', err);
+    sendError(ws, 'Registration failed');
+  }
+}
+
+function broadcastUserList() {
+  const users = Array.from(activeConnections.keys());
+  const payload = JSON.stringify({ type: 'user_list', users });
+
+  activeConnections.forEach((socket) => {
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(payload);
+    }
+  });
+}
+
+function sendError(ws, message) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'error', message }));
+  }
+}
+
+async function handleMessage(data) {
+  const { from, to, text } = data;
+
+  const message = new Message({
+    id: uuidv4(),
+    from,
+    to,
+    text,
+    status: 'queued'
+  });
+
+  await message.save();
+
+  const targetWS = activeConnections.get(to);
+  if (targetWS && targetWS.readyState === WebSocket.OPEN) {
+    targetWS.send(JSON.stringify({
+      type: 'message',
+      from,
+      text,
+      id: message.id,
+      timestamp: message.timestamp
+    }));
+
+    message.status = 'delivered';
+    message.deliveredAt = new Date();
+    await message.save();
+  }
+}
+
+async function handleAcknowledgment(data) {
+  const { id, status } = data;
+  await Message.updateOne({ id }, {
+    $set: {
+      status,
+      ...(status === 'read' && { readAt: new Date() }),
+    }
+  });
+}
+
+function handleTyping(data) {
+  const { from, to, isTyping } = data;
+  const targetWS = activeConnections.get(to);
+
+  if (targetWS && targetWS.readyState === WebSocket.OPEN) {
+    targetWS.send(JSON.stringify({
+      type: 'typing',
+      from,
+      isTyping
+    }));
+  }
+}
+
+async function handleReadReceipt(data) {
+  const { messageId, reader } = data;
+
+  await Message.updateOne({ id: messageId }, {
+    $set: {
+      status: 'read',
+      readAt: new Date()
+    }
+  });
+}
+
+async function handleHistoryRequest(ws, data) {
+  const { from, to } = data;
+
+  const messages = await Message.find({
+    $or: [
+      { from, to },
+      { from: to, to: from }
+    ]
+  }).sort({ timestamp: 1 });
+
+  ws.send(JSON.stringify({
+    type: 'history',
+    messages
+  }));
+}
