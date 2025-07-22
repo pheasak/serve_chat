@@ -28,16 +28,29 @@ wss.on('connection', (ws, req) => {
   }
 
   let username = '';
-  
+
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message);
+      // In your WebSocket server code
+      if (data.type === 'typing') {
+        const recipient = users.get(data.to);
+        if (recipient && recipient.readyState === WebSocket.OPEN) {
+          recipient.send(JSON.stringify({
+            type: 'typing',
+            from: username,
+            isTyping: data.isTyping
+          }));
+        }
+        return;
+      }
+
       
       if (data.type === 'register') {
         username = data.username;
         users.set(username, ws);
         console.log(`${username} connected from ${req.socket.remoteAddress}`);
-        
+
         // Deliver queued messages
         if (messageQueue.has(username)) {
           const pendingMessages = messageQueue.get(username);
@@ -46,11 +59,11 @@ wss.on('connection', (ws, req) => {
           });
           messageQueue.delete(username);
         }
-        
+
         broadcastUserList();
         return;
       }
-      
+
       if (data.type === 'message') {
         const messageId = data.id || uuidv4();
         const recipient = users.get(data.to);
@@ -61,7 +74,7 @@ wss.on('connection', (ws, req) => {
           text: data.text,
           timestamp: new Date().toISOString()
         };
-        
+
         // Track for acknowledgment
         pendingAcknowledgments.set(messageId, {
           sender: username,
@@ -73,7 +86,7 @@ wss.on('connection', (ws, req) => {
         if (recipient && recipient.readyState === WebSocket.OPEN) {
           // Recipient online - send immediately
           recipient.send(JSON.stringify(messageData));
-          
+
           // Set delivery timeout (30 seconds)
           const deliveryTimeout = setTimeout(() => {
             if (pendingAcknowledgments.has(messageId)) {
@@ -92,7 +105,7 @@ wss.on('connection', (ws, req) => {
           }
           messageQueue.get(data.to).push(messageData);
           console.log(`Queued message ${messageId} for ${data.to}`);
-          
+
           // Notify sender
           ws.send(JSON.stringify({
             type: 'delivery_status',
@@ -101,7 +114,7 @@ wss.on('connection', (ws, req) => {
             timestamp: new Date().toISOString()
           }));
         }
-        
+
         // Send preliminary acknowledgment
         ws.send(JSON.stringify({
           type: 'ack',
@@ -111,17 +124,17 @@ wss.on('connection', (ws, req) => {
         }));
         return;
       }
-      
+
       if (data.type === 'ack') {
         handleAcknowledgment(data.messageId, username);
         return;
       }
-      
+
       if (data.type === 'read_receipt') {
         handleReadReceipt(data.messageId, username);
         return;
       }
-      
+
     } catch (error) {
       console.error('Error processing message:', error);
       ws.send(JSON.stringify({
@@ -139,7 +152,7 @@ wss.on('connection', (ws, req) => {
       broadcastUserList();
     }
   });
-  
+
   ws.on('error', (error) => {
     console.error(`WebSocket error for ${username || 'unknown'}:`, error);
   });
@@ -148,25 +161,25 @@ wss.on('connection', (ws, req) => {
 // Helper functions
 function handleAcknowledgment(messageId, username) {
   if (!messageId || !pendingAcknowledgments.has(messageId)) return;
-  
+
   const msg = pendingAcknowledgments.get(messageId);
   console.log(`Message ${messageId} acknowledged by ${username}`);
-  
+
   // Clear delivery timeout
   if (msg.timeout) clearTimeout(msg.timeout);
-  
+
   // Notify sender
   notifySender(msg.sender, messageId, 'delivered');
-  
+
   pendingAcknowledgments.delete(messageId);
 }
 
 function handleReadReceipt(messageId, username) {
   if (!messageId || !pendingAcknowledgments.has(messageId)) return;
-  
+
   const msg = pendingAcknowledgments.get(messageId);
   console.log(`Message ${messageId} read by ${username}`);
-  
+
   notifySender(msg.sender, messageId, 'read');
 }
 
@@ -189,7 +202,7 @@ function broadcastUserList() {
     users: userList,
     timestamp: new Date().toISOString()
   });
-  
+
   users.forEach((ws, username) => {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(message);
