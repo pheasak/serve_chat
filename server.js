@@ -110,7 +110,6 @@ server.on('request', (req, res) => {
 });
 
 wss.on('connection', (ws, req) => {
-  const ip = req.socket.remoteAddress;
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
 
@@ -121,7 +120,7 @@ wss.on('connection', (ws, req) => {
 
       switch (data.type) {
         case 'register':
-          await handleRegistration(ws, data, req);
+          await handleRegistration(ws, data);
           break;
         case 'message':
           await handleMessage(data);
