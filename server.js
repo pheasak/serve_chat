@@ -115,7 +115,7 @@ wss.on('connection', (ws, req) => {
           await handleAcknowledgment(data);
           break;
         case 'typing':
-          handleTyping(data);
+          handleTypingIndicator(data);
           break;
         case 'read_receipt':
           await handleReadReceipt(data);
@@ -223,15 +223,33 @@ async function handleRegistration(ws, data) {
   }
 }
 
-function broadcastUserList() {
-  const users = Array.from(activeConnections.keys());
-  const payload = JSON.stringify({ type: 'user_list', users });
+// In your server's broadcastUserList function
+async function broadcastUserList() {
+  try {
+    const users = await User.find({})
+      .sort({ lastSeen: -1 })
+      .limit(100)
+      .select('username online lastSeen')
+      .lean();
 
-  activeConnections.forEach((socket) => {
-    if (socket.readyState === WebSocket.OPEN) {
-      socket.send(payload);
-    }
-  });
+    const message = JSON.stringify({
+      type: 'user_list',
+      users: users.map(user => ({
+        username: user.username,
+        online: user.online || false,
+        lastSeen: user.lastSeen ? user.lastSeen.toISOString() : null
+      })),
+      timestamp: new Date().toISOString()
+    });
+
+    activeConnections.forEach(ws => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(message);
+      }
+    });
+  } catch (error) {
+    console.error('Error broadcasting user list:', error);
+  }
 }
 
 function sendError(ws, message) {
@@ -279,18 +297,16 @@ async function handleAcknowledgment(data) {
   });
 }
 
-function handleTyping(data) {
-  const { from, to, isTyping } = data;
-  const targetWS = activeConnections.get(to);
-
-  if (targetWS && targetWS.readyState === WebSocket.OPEN) {
-    targetWS.send(JSON.stringify({
-      type: 'typing',
-      from,
-      isTyping
-    }));
+function handleTypingIndicator(data) {
+    const recipient = activeConnections.get(data.to);
+    if (recipient && recipient.readyState === WebSocket.OPEN) {
+      recipient.send(JSON.stringify({
+        type: 'typing',
+        from: username,
+        isTyping: data.isTyping
+      }));
+    }
   }
-}
 
 async function handleReadReceipt(data) {
   const { messageId, reader } = data;
