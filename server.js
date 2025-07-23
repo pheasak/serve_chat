@@ -320,17 +320,52 @@ async function handleReadReceipt(data) {
 }
 
 async function handleHistoryRequest(ws, data) {
-  const { from, to } = data;
+  try {
+    const { from, to, limit = 50 } = data;
 
-  const messages = await Message.find({
-    $or: [
-      { from, to },
-      { from: to, to: from }
-    ]
-  }).sort({ timestamp: 1 });
+    // Validate input parameters
+    if (!from || !to) {
+      throw new Error('Both "from" and "to" parameters are required');
+    }
 
-  ws.send(JSON.stringify({
-    type: 'history',
-    messages
-  }));
+    // Query messages between the two users
+    const messages = await Message.find({
+      $or: [
+        { from, to },
+        { from: to, to: from }
+      ]
+    })
+    .sort({ timestamp: 1 }) // Sort by oldest first
+    .limit(limit) // Apply limit to prevent overloading
+    .lean() // Convert to plain JavaScript objects
+    .exec(); // Execute the query
+
+    // Format the response
+    const response = {
+      type: 'history',
+      messages: messages.map(msg => ({
+        id: msg.id,
+        from: msg.from,
+        to: msg.to,
+        text: msg.text,
+        timestamp: msg.timestamp,
+        status: msg.status || 'delivered' // Default status if not set
+      }))
+    };
+
+    // Send the response
+    ws.send(JSON.stringify(response));
+
+    // Log successful query
+    console.log(`Sent ${messages.length} messages history between ${from} and ${to}`);
+  } catch (error) {
+    console.error('Error fetching message history:', error);
+    
+    // Send error response to client
+    ws.send(JSON.stringify({
+      type: 'error',
+      message: 'Failed to load message history',
+      details: error.message
+    }));
+  }
 }
