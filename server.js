@@ -325,7 +325,7 @@ function handleTypingIndicator(data) {
             // Prepare typing notification payload
             const typingNotification = JSON.stringify({
                 type: 'typing',
-                from: username,  // Make sure 'username' is available in scope
+                from: data.from,  // Make sure 'username' is available in scope
                 to: data.to,
                 isTyping: data.isTyping,
                 timestamp: new Date().toISOString()
