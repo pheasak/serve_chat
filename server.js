@@ -340,7 +340,7 @@ function handleTypingIndicator(data) {
             // Update typing status in MongoDB (optional)
             if (process.env.LOG_TYPING_EVENTS === 'true') {
                 TypingEvent.create({
-                    from: username,
+                    from: data.from,
                     to: data.to,
                     isTyping: data.isTyping
                 }).catch(err => {
@@ -354,8 +354,8 @@ function handleTypingIndicator(data) {
         console.error('Error handling typing indicator:', error);
         
         // Optionally notify the sender about the error
-        if (activeConnections.has(username)) {
-            const sender = activeConnections.get(username);
+        if (activeConnections.has(data.from)) {
+            const sender = activeConnections.get(data.from);
             if (sender && sender.readyState === WebSocket.OPEN) {
                 sender.send(JSON.stringify({
                     type: 'error',
