@@ -62,14 +62,20 @@ const messageSchema = new mongoose.Schema({
   readAt: Date
 });
 
-messageSchema.index({ from: 1, to: 1, timestamp: 1 });
-messageSchema.index({ to: 1, status: 1 });
+// messageSchema.index({ from: 1, to: 1, timestamp: 1 });
+// messageSchema.index({ to: 1, status: 1 });
+// messageSchema.index({ readAt: 1 });
+
+messageSchema.index({ from: 1, to: 1 });
+messageSchema.index({ status: 1 });
+messageSchema.index({ readAt: 1 });
+
 userSchema.index({ username: 1 }, { unique: true });
 const typingEventSchema = new mongoose.Schema({
-    from: String,
-    to: String,
-    isTyping: Boolean,
-    timestamp: { type: Date, default: Date.now }
+  from: String,
+  to: String,
+  isTyping: Boolean,
+  timestamp: { type: Date, default: Date.now }
 });
 const TypingEvent = mongoose.model('TypingEvent', typingEventSchema);
 const User = mongoose.model('User', userSchema);
@@ -304,78 +310,103 @@ async function handleAcknowledgment(data) {
 }
 
 function handleTypingIndicator(data) {
-    try {
-        // Validate incoming data
-        if (!data || typeof data !== 'object') {
-            throw new Error('Invalid typing data format');
-        }
-
-        const { to, isTyping } = data;
-        
-        // Validate required fields
-        if (!to || typeof isTyping !== 'boolean') {
-            throw new Error('Missing required fields: to or isTyping');
-        }
-
-        // Get recipient connection
-        const recipient = activeConnections.get(to);
-        
-        // Check if recipient exists and connection is open
-        if (recipient && recipient.readyState === WebSocket.OPEN) {
-            // Prepare typing notification payload
-            const typingNotification = JSON.stringify({
-                type: 'typing',
-                from: data.from,  // Make sure 'username' is available in scope
-                to: data.to,
-                isTyping: data.isTyping,
-                timestamp: new Date().toISOString()
-            });
-
-            // Send notification
-            recipient.send(typingNotification);
-            
-            // Log the event (optional)
-            console.log(`Typing ${data.isTyping ? 'started' : 'stopped'} from ${username} to ${to}`);
-            
-            // Update typing status in MongoDB (optional)
-            if (process.env.LOG_TYPING_EVENTS === 'true') {
-                TypingEvent.create({
-                    from: data.from,
-                    to: data.to,
-                    isTyping: data.isTyping
-                }).catch(err => {
-                    console.error('Failed to log typing event:', err);
-                });
-            }
-        } else {
-            console.log(`Recipient ${to} is not currently connected`);
-        }
-    } catch (error) {
-        console.error('Error handling typing indicator:', error);
-        
-        // Optionally notify the sender about the error
-        if (activeConnections.has(data.from)) {
-            const sender = activeConnections.get(data.from);
-            if (sender && sender.readyState === WebSocket.OPEN) {
-                sender.send(JSON.stringify({
-                    type: 'error',
-                    message: 'Failed to send typing indicator',
-                    originalData: data
-                }));
-            }
-        }
+  try {
+    // Validate incoming data
+    if (!data || typeof data !== 'object') {
+      throw new Error('Invalid typing data format');
     }
+
+    const { to, isTyping } = data;
+
+    // Validate required fields
+    if (!to || typeof isTyping !== 'boolean') {
+      throw new Error('Missing required fields: to or isTyping');
+    }
+
+    // Get recipient connection
+    const recipient = activeConnections.get(to);
+
+    // Check if recipient exists and connection is open
+    if (recipient && recipient.readyState === WebSocket.OPEN) {
+      // Prepare typing notification payload
+      const typingNotification = JSON.stringify({
+        type: 'typing',
+        from: data.from,  // Make sure 'username' is available in scope
+        to: data.to,
+        isTyping: data.isTyping,
+        timestamp: new Date().toISOString()
+      });
+
+      // Send notification
+      recipient.send(typingNotification);
+
+      // Log the event (optional)
+      console.log(`Typing ${data.isTyping ? 'started' : 'stopped'} from ${username} to ${to}`);
+
+      // Update typing status in MongoDB (optional)
+      if (process.env.LOG_TYPING_EVENTS === 'true') {
+        TypingEvent.create({
+          from: data.from,
+          to: data.to,
+          isTyping: data.isTyping
+        }).catch(err => {
+          console.error('Failed to log typing event:', err);
+        });
+      }
+    } else {
+      console.log(`Recipient ${to} is not currently connected`);
+    }
+  } catch (error) {
+    console.error('Error handling typing indicator:', error);
+
+    // Optionally notify the sender about the error
+    if (activeConnections.has(data.from)) {
+      const sender = activeConnections.get(data.from);
+      if (sender && sender.readyState === WebSocket.OPEN) {
+        sender.send(JSON.stringify({
+          type: 'error',
+          message: 'Failed to send typing indicator',
+          originalData: data
+        }));
+      }
+    }
+  }
 }
 
 async function handleReadReceipt(data) {
   const { messageId, reader } = data;
 
-  await Message.updateOne({ id: messageId }, {
-    $set: {
-      status: 'read',
-      readAt: new Date()
+  // Update message status in MongoDB
+  await Message.updateOne(
+    { id: messageId },
+    {
+      $set: {
+        status: 'read',
+        readAt: new Date()
+      }
     }
-  });
+  );
+
+  // Update user's last seen time
+  await User.updateOne(
+    { username: reader },
+    { $set: { lastSeen: new Date() } }
+  );
+
+
+  // Notify sender that their message was read
+  const messageDoc = await Message.findOne({ id: messageId });
+  if (messageDoc) {
+    const senderWs = activeConnections.get(messageDoc.from);
+    if (senderWs && senderWs.readyState === WebSocket.OPEN) {
+      senderWs.send(JSON.stringify({
+        type: 'read_status',
+        messageId,
+        reader,
+        timestamp: new Date().toISOString()
+      }));
+    }
+  }
 }
 
 async function handleHistoryRequest(ws, data) {
@@ -394,10 +425,10 @@ async function handleHistoryRequest(ws, data) {
         { from: to, to: from }
       ]
     })
-    .sort({ timestamp: 1 }) // Sort by oldest first
-    .limit(limit) // Apply limit to prevent overloading
-    .lean() // Convert to plain JavaScript objects
-    .exec(); // Execute the query
+      .sort({ timestamp: 1 }) // Sort by oldest first
+      .limit(limit) // Apply limit to prevent overloading
+      .lean() // Convert to plain JavaScript objects
+      .exec(); // Execute the query
 
     // Format the response
     const response = {
@@ -419,7 +450,7 @@ async function handleHistoryRequest(ws, data) {
     console.log(`Sent ${messages.length} messages history between ${from} and ${to}`);
   } catch (error) {
     console.error('Error fetching message history:', error);
-    
+
     // Send error response to client
     ws.send(JSON.stringify({
       type: 'error',
