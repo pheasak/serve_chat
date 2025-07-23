@@ -65,7 +65,13 @@ const messageSchema = new mongoose.Schema({
 messageSchema.index({ from: 1, to: 1, timestamp: 1 });
 messageSchema.index({ to: 1, status: 1 });
 userSchema.index({ username: 1 }, { unique: true });
-
+const typingEventSchema = new mongoose.Schema({
+    from: String,
+    to: String,
+    isTyping: Boolean,
+    timestamp: { type: Date, default: Date.now }
+});
+const TypingEvent = mongoose.model('TypingEvent', typingEventSchema);
 const User = mongoose.model('User', userSchema);
 const Message = mongoose.model('Message', messageSchema);
 
@@ -298,15 +304,68 @@ async function handleAcknowledgment(data) {
 }
 
 function handleTypingIndicator(data) {
-    const recipient = activeConnections.get(data.to);
-    if (recipient && recipient.readyState === WebSocket.OPEN) {
-      recipient.send(JSON.stringify({
-        type: 'typing',
-        from: username,
-        isTyping: data.isTyping
-      }));
+    try {
+        // Validate incoming data
+        if (!data || typeof data !== 'object') {
+            throw new Error('Invalid typing data format');
+        }
+
+        const { to, isTyping } = data;
+        
+        // Validate required fields
+        if (!to || typeof isTyping !== 'boolean') {
+            throw new Error('Missing required fields: to or isTyping');
+        }
+
+        // Get recipient connection
+        const recipient = activeConnections.get(to);
+        
+        // Check if recipient exists and connection is open
+        if (recipient && recipient.readyState === WebSocket.OPEN) {
+            // Prepare typing notification payload
+            const typingNotification = JSON.stringify({
+                type: 'typing',
+                from: username,  // Make sure 'username' is available in scope
+                to: data.to,
+                isTyping: data.isTyping,
+                timestamp: new Date().toISOString()
+            });
+
+            // Send notification
+            recipient.send(typingNotification);
+            
+            // Log the event (optional)
+            console.log(`Typing ${data.isTyping ? 'started' : 'stopped'} from ${username} to ${to}`);
+            
+            // Update typing status in MongoDB (optional)
+            if (process.env.LOG_TYPING_EVENTS === 'true') {
+                TypingEvent.create({
+                    from: username,
+                    to: data.to,
+                    isTyping: data.isTyping
+                }).catch(err => {
+                    console.error('Failed to log typing event:', err);
+                });
+            }
+        } else {
+            console.log(`Recipient ${to} is not currently connected`);
+        }
+    } catch (error) {
+        console.error('Error handling typing indicator:', error);
+        
+        // Optionally notify the sender about the error
+        if (activeConnections.has(username)) {
+            const sender = activeConnections.get(username);
+            if (sender && sender.readyState === WebSocket.OPEN) {
+                sender.send(JSON.stringify({
+                    type: 'error',
+                    message: 'Failed to send typing indicator',
+                    originalData: data
+                }));
+            }
+        }
     }
-  }
+}
 
 async function handleReadReceipt(data) {
   const { messageId, reader } = data;
